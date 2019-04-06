@@ -460,6 +460,16 @@ def argon2i_32(nb_blocks, nb_iterations, password, salt, key=None, ad=None):
     crypto_wipe(password, len(password))
     return hash
 
+def public_key_exchange_key_compute(secret_key):
+    """Generate the public key for key exchange from the secret key.
+
+    :param secret_key: The 32-byte secret key.
+    :return: The 32-byte public key.
+    """
+    public_key = bytes(32)
+    crypto_x25519_public_key(public_key, secret_key)
+    return public_key
+
 
 def key_exchange(your_secret_key, their_public_key):
     """Compute a shared secret based upon public-key crytography.
@@ -476,8 +486,8 @@ def key_exchange(your_secret_key, their_public_key):
     return p
 
 
-def public_key_compute(secret_key):
-    """Generate the public key from the secret key.
+def public_signing_key_compute(secret_key):
+    """Generate the public signing key from the secret key.
 
     :param secret_key: The 32-byte secret key.
     :return: The 32-byte public key.
@@ -592,13 +602,25 @@ def generate_key(length=None, method=None):
     return key
 
 
-def generate_key_pair():
+def generate_signing_key_pair():
     """Generate and print a new keypair using default settings.
 
     :return (secret, public).
     """
     secret = generate_key()
-    public = public_key_compute(secret)
+    public = public_signing_key_compute(secret)
+    print('secret = %s\npublic = %s' % (
+        binascii.hexlify(secret),
+        binascii.hexlify(public)))
+    return secret, public
+
+def generate_exchange_key_pair():
+    """Generate and print a new keypair using default settings.
+
+    :return (secret, public).
+    """
+    secret = generate_key()
+    public = public_key_exchange_key_compute(secret)
     print('secret = %s\npublic = %s' % (
         binascii.hexlify(secret),
         binascii.hexlify(public)))

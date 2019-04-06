@@ -3,6 +3,12 @@
 
 This file contains the list of changes made to pymonocypher.
 
+## 0.1.3
+
+2019 Apr 06
+
+*   Distinguish between public keys for signing and key exchange.
+
 
 ## 0.1.2
 
