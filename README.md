@@ -1,4 +1,6 @@
 
+This is a quick fork & edit to make both functions fpr deriving public keys available, so the key exchange can be done properly.
+
 # pymonocypher
 
 This python package uses cython to wrap the Monocypher C library. 
