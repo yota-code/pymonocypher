@@ -82,7 +82,7 @@ static u64 x16(const u8 a[16], const u8 b[16])
     return (load64_le(a + 0) ^ load64_le(b + 0))
         |  (load64_le(a + 8) ^ load64_le(b + 8));
 }
-static u64 x32(const u8 a[16],const u8 b[16]){return x16(a,b)| x16(a+16, b+16);}
+static u64 x32(const u8 a[32],const u8 b[32]){return x16(a,b)| x16(a+16, b+16);}
 static u64 x64(const u8 a[64],const u8 b[64]){return x32(a,b)| x32(a+32, b+32);}
 int crypto_verify16(const u8 a[16], const u8 b[16]){ return neq0(x16(a, b)); }
 int crypto_verify32(const u8 a[32], const u8 b[32]){ return neq0(x32(a, b)); }
@@ -150,7 +150,7 @@ static void chacha20_init_key(crypto_chacha_ctx *ctx, const u8 key[32])
 static u8 chacha20_pool_byte(crypto_chacha_ctx *ctx)
 {
     u32 pool_word = ctx->pool[ctx->pool_idx >> 2];
-    u8  pool_byte = pool_word >> (8*(ctx->pool_idx & 3));
+    u8  pool_byte = (u8)(pool_word >> (8*(ctx->pool_idx & 3)));
     ctx->pool_idx++;
     return pool_byte;
 }
@@ -272,7 +272,7 @@ void crypto_chacha20_encrypt(crypto_chacha_ctx *ctx,
 }
 
 void crypto_chacha20_stream(crypto_chacha_ctx *ctx,
-                            uint8_t *stream, size_t size)
+                            u8 *stream, size_t size)
 {
     crypto_chacha20_encrypt(ctx, stream, 0, size);
 }
@@ -388,10 +388,9 @@ void crypto_poly1305_update(crypto_poly1305_ctx *ctx,
     // Process the message block by block
     size_t nb_blocks = message_size >> 4;
     FOR (i, 0, nb_blocks) {
-        ctx->c[0] = load32_le(message +  0);
-        ctx->c[1] = load32_le(message +  4);
-        ctx->c[2] = load32_le(message +  8);
-        ctx->c[3] = load32_le(message + 12);
+        FOR (j, 0, 4) {
+            ctx->c[j] = load32_le(message +  j*4);
+        }
         poly_block(ctx);
         message += 16;
     }
@@ -482,6 +481,8 @@ static void blake2b_compress(crypto_blake2b_ctx *ctx, int is_last_block)
         { 13, 11,  7, 14, 12,  1,  3,  9,  5,  0, 15,  4,  8,  6,  2, 10 },
         {  6, 15, 14,  9, 11,  3,  0,  8, 12,  2, 13,  7,  1,  4, 10,  5 },
         { 10,  2,  8,  4,  7,  6,  1,  5, 15, 11,  9, 14,  3, 12, 13,  0 },
+        {  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15 },
+        { 14, 10,  4,  8,  9, 15, 13,  6,  1, 12,  0,  2, 11,  7,  5,  3 },
     };
 
     // init work vector
@@ -495,7 +496,7 @@ static void blake2b_compress(crypto_blake2b_ctx *ctx, int is_last_block)
     u64 v7 = ctx->hash[7];  u64 v15 = iv[7];
 
     // mangle work vector
-    uint64_t *input = ctx->input;
+    u64 *input = ctx->input;
 #define BLAKE2_G(v, a, b, c, d, x, y)                  \
     v##a += v##b + x;  v##d = rotr64(v##d ^ v##a, 32); \
     v##c += v##d;      v##b = rotr64(v##b ^ v##c, 24); \
@@ -511,9 +512,15 @@ static void blake2b_compress(crypto_blake2b_ctx *ctx, int is_last_block)
     BLAKE2_G(v, 2, 7,  8, 13, input[sigma[i][12]], input[sigma[i][13]]);\
     BLAKE2_G(v, 3, 4,  9, 14, input[sigma[i][14]], input[sigma[i][15]])
 
+#ifdef BLAKE2_NO_UNROLLING
+    FOR (i, 0, 12) {
+        BLAKE2_ROUND(i);
+    }
+#else
     BLAKE2_ROUND(0);  BLAKE2_ROUND(1);  BLAKE2_ROUND(2);  BLAKE2_ROUND(3);
     BLAKE2_ROUND(4);  BLAKE2_ROUND(5);  BLAKE2_ROUND(6);  BLAKE2_ROUND(7);
     BLAKE2_ROUND(8);  BLAKE2_ROUND(9);  BLAKE2_ROUND(0);  BLAKE2_ROUND(1);
+#endif
 
     // update hash
     ctx->hash[0] ^= v0 ^ v8;
@@ -620,7 +627,7 @@ void crypto_blake2b_final(crypto_blake2b_ctx *ctx, u8 *hash)
     FOR (i, 0, nb_words) {
         store64_le(hash + i*8, ctx->hash[i]);
     }
-    FOR (i, nb_words * 8, ctx->hash_size) {
+    FOR (i, nb_words << 3, ctx->hash_size) {
         hash[i] = (ctx->hash[i >> 3] >> (8 * (i & 7))) & 0xff;
     }
     WIPE_CTX(ctx);
@@ -1019,8 +1026,9 @@ static void fe_sub (fe h,const fe f,const fe g){FOR(i,0,10) h[i] = f[i] - g[i];}
 
 static void fe_cswap(fe f, fe g, int b)
 {
+    i32 mask = -b; // rely on 2's complement: -1 = 0xffffffff
     FOR (i, 0, 10) {
-        i32 x = (f[i] ^ g[i]) & -b;
+        i32 x = (f[i] ^ g[i]) & mask;
         f[i] = f[i] ^ x;
         g[i] = g[i] ^ x;
     }
@@ -1028,8 +1036,9 @@ static void fe_cswap(fe f, fe g, int b)
 
 static void fe_ccopy(fe f, const fe g, int b)
 {
+    i32 mask = -b; // rely on 2's complement: -1 = 0xffffffff
     FOR (i, 0, 10) {
-        i32 x = (f[i] ^ g[i]) & -b;
+        i32 x = (f[i] ^ g[i]) & mask;
         f[i] = f[i] ^ x;
     }
 }
@@ -1060,7 +1069,7 @@ static void fe_frombytes(fe h, const u8 s[32])
     i64 t6 =  load24_le(s + 20) << 7;
     i64 t7 =  load24_le(s + 23) << 5;
     i64 t8 =  load24_le(s + 26) << 4;
-    i64 t9 = (load24_le(s + 29) & 8388607) << 2;
+    i64 t9 = (load24_le(s + 29) & 0x7fffff) << 2;
     FE_CARRY;
 }
 
@@ -1264,14 +1273,10 @@ static int fe_isnonzero(const fe f)
 {
     u8 s[32];
     fe_tobytes(s, f);
-    u8 isnonzero = zerocmp32(s);
+    int isnonzero = zerocmp32(s);
     WIPE_BUFFER(s);
     return isnonzero;
 }
-
-///////////////
-/// X-25519 /// Taken from Supercop's ref10 implementation.
-///////////////
 
 static void trim_scalar(u8 s[32])
 {
@@ -1280,7 +1285,11 @@ static void trim_scalar(u8 s[32])
     s[31] |= 64;
 }
 
-static int scalar_bit(const u8 s[32], int i) { return (s[i>>3] >> (i&7)) & 1; }
+static int scalar_bit(const u8 s[32], size_t i) {return (s[i>>3] >> (i&7)) & 1;}
+
+///////////////
+/// X-25519 /// Taken from Supercop's ref10 implementation.
+///////////////
 
 int crypto_x25519(u8       raw_shared_secret[32],
                   const u8 your_secret_key  [32],
@@ -1353,7 +1362,7 @@ void crypto_x25519_public_key(u8       public_key[32],
 /// Ed25519 ///
 ///////////////
 
-static const  u64 L[32] = { 0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+static const  i64 L[32] = { 0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
                             0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
                             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10};
@@ -1559,6 +1568,16 @@ static void ge_madd(ge *s, const ge *p, const fe yp, const fe ym, const fe t2,
     fe_mul(s->Z, a   , b   );
 }
 
+// Internal buffers are not wiped! Inputs must not be secret!
+// => Use only to *check* signatures.
+static void ge_msub(ge *s, const ge *p, const fe yp, const fe ym, const fe t2,
+                    fe a, fe b)
+{
+    fe n2;
+    fe_neg(n2, t2);
+    ge_madd(s, p, ym, yp, n2, a, b);
+}
+
 static void ge_double(ge *s, const ge *p, ge *q)
 {
     fe_sq (q->X, p->X);
@@ -1577,22 +1596,77 @@ static void ge_double(ge *s, const ge *p, ge *q)
     fe_mul(s->T, q->X , q->T);
 }
 
-// Compute signed sliding windows (either 0, or odd numbers between -15 and 15)
-static void slide(i8 adds[258], const u8 scalar[32])
+static const fe window_Yp[8] = {
+    {25967493, -14356035, 29566456, 3660896, -12694345,
+     4014787, 27544626, -11754271, -6079156, 2047605},
+    {15636291, -9688557, 24204773, -7912398, 616977,
+     -16685262, 27787600, -14772189, 28944400, -1550024},
+    {10861363, 11473154, 27284546, 1981175, -30064349,
+     12577861, 32867885, 14515107, -15438304, 10819380},
+    {5153746, 9909285, 1723747, -2777874, 30523605,
+     5516873, 19480852, 5230134, -23952439, -15175766},
+    {-22518993, -6692182, 14201702, -8745502, -23510406,
+     8844726, 18474211, -1361450, -13062696, 13821877},
+    {-25154831, -4185821, 29681144, 7868801, -6854661,
+     -9423865, -12437364, -663000, -31111463, -16132436},
+    {-33521811, 3180713, -2394130, 14003687, -16903474,
+     -16270840, 17238398, 4729455, -18074513, 9256800},
+    {-3151181, -5046075, 9282714, 6866145, -31907062,
+     -863023, -18940575, 15033784, 25105118, -7894876},
+};
+static const fe window_Ym[8] = {
+    {-12545711, 934262, -2722910, 3049990, -727428,
+     9406986, 12720692, 5043384, 19500929, -15469378},
+    {16568933, 4717097, -11556148, -1102322, 15682896,
+     -11807043, 16354577, -11775962, 7689662, 11199574},
+    {4708026, 6336745, 20377586, 9066809, -11272109,
+     6594696, -25653668, 12483688, -12668491, 5581306},
+    {-30269007, -3463509, 7665486, 10083793, 28475525,
+     1649722, 20654025, 16520125, 30598449, 7715701},
+    {-6455177, -7839871, 3374702, -4740862, -27098617,
+     -10571707, 31655028, -7212327, 18853322, -14220951},
+    {25576264, -2703214, 7349804, -11814844, 16472782,
+     9300885, 3844789, 15725684, 171356, 6466918},
+    {-25182317, -4174131, 32336398, 5036987, -21236817,
+     11360617, 22616405, 9761698, -19827198, 630305},
+    {-24326370, 15950226, -31801215, -14592823, -11662737,
+     -5090925, 1573892, -2625887, 2198790, -15804619},
+};
+static const fe window_T2[8] = {
+    {-8738181, 4489570, 9688441, -14785194, 10184609,
+     -12363380, 29287919, 11864899, -24514362, -4438546},
+    {30464156, -5976125, -11779434, -15670865, 23220365,
+     15915852, 7512774, 10017326, -17749093, -9920357},
+    {19563160, 16186464, -29386857, 4097519, 10237984,
+     -4348115, 28542350, 13850243, -23678021, -15815942},
+    {28881845, 14381568, 9657904, 3680757, -20181635,
+     7843316, -31400660, 1370708, 29794553, -1409300},
+    {4566830, -12963868, -28974889, -12240689, -7602672,
+     -2830569, -8514358, -10431137, 2207753, -3209784},
+    {23103977, 13316479, 9739013, -16149481, 817875,
+     -15038942, 8965339, -14088058, -30714912, 16193877},
+    {-13720693, 2639453, -24237460, -7406481, 9494427,
+     -5774029, -6554551, -15960994, -2449256, -14291300},
+    {-3099351, 10324967, -2241613, 7453183, -5446979,
+     -2735503, -13812022, -16236442, -32461234, -12290683},
+};
+
+// Compute signed sliding windows (either 0, or odd numbers)
+static void slide(size_t width, i8 *adds, const u8 scalar[32])
 {
-    FOR (i,   0, 256) { adds[i] = scalar_bit(scalar, i); }
-    FOR (i, 256, 258) { adds[i] = 0;                     }
+    FOR (i,   0, 256        ) { adds[i] = (i8)scalar_bit(scalar, i); }
+    FOR (i, 256, 253 + width) { adds[i] = 0;                         }
     FOR (i, 0, 254) {
         if (adds[i] != 0) {
-            // base value of the 5-bit window
-            FOR (j, 1, 5) {
+            // base value of the window
+            FOR (j, 1, width) {
                 adds[i  ] |= adds[i+j] << j;
                 adds[i+j]  = 0;
             }
-            if (adds[i] > 16) {
-                // go back to [-15, 15], propagate carry.
-                adds[i] -= 32;
-                int j = i + 5;
+            if (adds[i] > (1 << (width - 1))) {
+                // go back to [-half_range, half_range], propagate carry.
+                adds[i] -= 1 << width;
+                size_t j = i + width;
                 while (adds[j] != 0) {
                     adds[j] = 0;
                     j++;
@@ -1603,42 +1677,31 @@ static void slide(i8 adds[258], const u8 scalar[32])
     }
 }
 
-// Look up table for sliding windows
-static void ge_precompute(ge_cached lut[8], const ge *P1)
-{
-    ge P2, tmp;
-    ge_double(&P2, P1, &tmp);
-    ge_cache(&lut[0], P1);
-    FOR (i, 0, 7) {
-        ge_add(&tmp, &P2, &lut[i]);
-        ge_cache(&lut[i+1], &tmp);
-    }
-}
+#define P_WINDOW_WIDTH 3 // Affects the size of the stack
+#define B_WINDOW_WIDTH 5 // Affects the size of the binary
+#define P_WINDOW_SIZE  (1<<(P_WINDOW_WIDTH-2))
+#define B_WINDOW_SIZE  (1<<(B_WINDOW_WIDTH-2))
 
-// Could be a function, but the macro avoids some overhead.
-#define LUT_ADD(sum, lut, adds, i)                             \
-    if (adds[i] > 0) { ge_add(sum, sum, &lut[ adds[i] / 2]); } \
-    if (adds[i] < 0) { ge_sub(sum, sum, &lut[-adds[i] / 2]); }
-
-// Variable time! P, sP, and sB must not be secret!
+// Variable time! Internal buffers are not wiped! Inputs must not be secret!
+// => Use only to *check* signatures.
 static void ge_double_scalarmult_vartime(ge *sum, const ge *P,
-                                         u8 p[32], u8 b[32])
+                                         const u8 p[32], const u8 b[32])
 {
-    static const fe X = { -14297830, -7645148, 16144683, -16471763, 27570974,
-                          -2696100, -26142465, 8378389, 20764389, 8758491 };
-    static const fe Y = { -26843541, -6710886, 13421773, -13421773, 26843546,
-                          6710886, -13421773, 13421773, -26843546, -6710886 };
-    ge B;
-    fe_copy(B.X, X);
-    fe_copy(B.Y, Y);
-    fe_1   (B.Z);
-    fe_mul (B.T, X, Y);
+    // cache P window for addition
+    ge_cached cP[P_WINDOW_SIZE];
+    {
+        ge P2, tmp;
+        ge_double(&P2, P, &tmp);
+        ge_cache(&cP[0], P);
+        FOR (i, 0, (P_WINDOW_SIZE)-1) {
+            ge_add(&tmp, &P2, &cP[i]);
+            ge_cache(&cP[i+1], &tmp);
+        }
+    }
 
-    // cached points for addition
-    ge_cached cP[8];  ge_precompute(cP,  P);
-    ge_cached cB[8];  ge_precompute(cB, &B);
-    i8 p_adds[258];   slide(p_adds, p);
-    i8 b_adds[258];   slide(b_adds, b);
+    // Compute the indices for the windows
+    i8 p_adds[253 + P_WINDOW_WIDTH];  slide(P_WINDOW_WIDTH, p_adds, p);
+    i8 b_adds[253 + B_WINDOW_WIDTH];  slide(B_WINDOW_WIDTH, b_adds, b);
 
     // Avoid the first doublings
     int i = 253;
@@ -1649,14 +1712,25 @@ static void ge_double_scalarmult_vartime(ge *sum, const ge *P,
     }
 
     // Merged double and add ladder
+    fe t1, t2;
+#define CACHED_ADD(i)                                              \
+    if (p_adds[i] > 0) { ge_add(sum, sum, &cP[ p_adds[i] / 2]); }  \
+    if (p_adds[i] < 0) { ge_sub(sum, sum, &cP[-p_adds[i] / 2]); }  \
+    if (b_adds[i] > 0) { ge_madd(sum, sum,                         \
+                                 window_Yp[ b_adds[i] / 2],            \
+                                 window_Ym[ b_adds[i] / 2],            \
+                                 window_T2[ b_adds[i] / 2], t1, t2); } \
+    if (b_adds[i] < 0) { ge_msub(sum, sum,                             \
+                                 window_Yp[-b_adds[i] / 2],            \
+                                 window_Ym[-b_adds[i] / 2],            \
+                                 window_T2[-b_adds[i] / 2], t1, t2); }
     ge_zero(sum);
-    LUT_ADD(sum, cP, p_adds, i);
-    LUT_ADD(sum, cB, b_adds, i);
+    CACHED_ADD(i);
     i--;
     while (i >= 0) {
-        ge_double(sum, sum, &B); // B is no longer used, we can overwrite it
-        LUT_ADD(sum, cP, p_adds, i);
-        LUT_ADD(sum, cB, b_adds, i);
+        ge tmp;
+        ge_double(sum, sum, &tmp);
+        CACHED_ADD(i);
         i--;
     }
 }
@@ -1786,8 +1860,8 @@ static void ge_scalarmult_base(ge *p, const u8 scalar[32])
     mul_add(s_scalar, scalar, half_mod_L, half_ones);
 
     // Double and add ladder
-    fe yp, ym, t2, n2, a, b; // temporaries for addition
-    ge dbl;                  // temporary for doublings
+    fe yp, ym, t2, n2, a; // temporaries for addition
+    ge dbl;               // temporary for doublings
     ge_zero(p);
     for (int i = 50; i >= 0; i--) {
         if (i < 50) {
@@ -1796,11 +1870,11 @@ static void ge_scalarmult_base(ge *p, const u8 scalar[32])
         fe_1(yp);
         fe_1(ym);
         fe_0(t2);
-        u8 teeth =  scalar_bit(s_scalar, i)
-            +      (scalar_bit(s_scalar, i +  51) << 1)
-            +      (scalar_bit(s_scalar, i + 102) << 2)
-            +      (scalar_bit(s_scalar, i + 153) << 3)
-            +      (scalar_bit(s_scalar, i + 204) << 4);
+        u8 teeth = (u8)((scalar_bit(s_scalar, i)           ) +
+                        (scalar_bit(s_scalar, i +  51) << 1) +
+                        (scalar_bit(s_scalar, i + 102) << 2) +
+                        (scalar_bit(s_scalar, i + 153) << 3) +
+                        (scalar_bit(s_scalar, i + 204) << 4));
         u8 high  = teeth >> 4;
         u8 index = (teeth ^ (high - 1)) & 15;
         FOR (j, 0, 16) {
@@ -1813,11 +1887,11 @@ static void ge_scalarmult_base(ge *p, const u8 scalar[32])
         fe_neg(n2, t2);
         fe_cswap(t2, n2, high);
         fe_cswap(yp, ym, high);
-        ge_madd(p, p, ym, yp, n2, a, b);
+        ge_madd(p, p, ym, yp, n2, a, t2); // reuse t2 as temporary
     }
     WIPE_CTX(&dbl);
-    WIPE_BUFFER(a);  WIPE_BUFFER(yp);  WIPE_BUFFER(t2);
-    WIPE_BUFFER(b);  WIPE_BUFFER(ym);  WIPE_BUFFER(n2);
+    WIPE_BUFFER(yp);  WIPE_BUFFER(t2);  WIPE_BUFFER(a);
+    WIPE_BUFFER(ym);  WIPE_BUFFER(n2);
     WIPE_BUFFER(s_scalar);
 }
 
@@ -1931,8 +2005,10 @@ void crypto_check_update(crypto_check_ctx *ctx, const u8 *msg, size_t msg_size)
 
 int crypto_check_final(crypto_check_ctx *ctx)
 {
-    ge diff, A;
-    u8 h_ram[64], R_check[32];
+    ge  A;
+    ge *diff = &A;       // share stack space
+    u8  h_ram[64];
+    u8 *R_check = h_ram; // share stack space
     u8 *s = ctx->sig + 32;                       // s
     u8 *R = ctx->sig;                            // R
     if (ge_frombytes_neg_vartime(&A, ctx->pk) ||
@@ -1941,8 +2017,8 @@ int crypto_check_final(crypto_check_ctx *ctx)
     }
     HASH_FINAL(&ctx->hash, h_ram);
     reduce(h_ram);
-    ge_double_scalarmult_vartime(&diff, &A, h_ram, s);
-    ge_tobytes(R_check, &diff);                  // R_check = s*B - h_ram*A
+    ge_double_scalarmult_vartime(diff, &A, h_ram, s);
+    ge_tobytes(R_check, diff);                   // R_check = s*B - h_ram*A
     return crypto_verify32(R, R_check);          // R == R_check ? OK : fail
     // No secret, no wipe
 }
@@ -1964,11 +2040,8 @@ int crypto_key_exchange(u8       shared_key[32],
                         const u8 your_secret_key [32],
                         const u8 their_public_key[32])
 {
-    u8 raw_shared_secret[32];
-    int status = crypto_x25519(raw_shared_secret,
-                               your_secret_key, their_public_key);
-    crypto_chacha20_H(shared_key, raw_shared_secret, zero);
-    WIPE_BUFFER(raw_shared_secret);
+    int status = crypto_x25519(shared_key, your_secret_key, their_public_key);
+    crypto_chacha20_H(shared_key, shared_key, zero);
     return status;
 }
 
@@ -2098,3 +2171,228 @@ int crypto_unlock(u8       *plain_text,
     return crypto_unlock_aead(plain_text, key, nonce, mac, 0, 0,
                               cipher_text, text_size);
 }
+
+///////////////////////
+/// Secure channels ///
+///////////////////////
+static void copy32(u8 out[32], const u8 in[32]){FOR (i, 0, 32){out[i] = in[i];}}
+static void xor32 (u8 out[32], const u8 in[32]){FOR (i, 0, 32){out[i]^= in[i];}}
+
+static void kex_update_key(crypto_kex_ctx  *ctx,
+                           const u8 secret_key[32],
+                           const u8 public_key[32])
+{
+    static const u8 one[16] = {1};
+
+    // Extract
+    u8 shared_secret[32];
+    crypto_x25519(shared_secret, secret_key, public_key);
+    crypto_chacha20_H(shared_secret    , shared_secret    , zero);
+    crypto_chacha20_H(ctx->chaining_key, ctx->chaining_key, one );
+    xor32(ctx->chaining_key, shared_secret);
+
+    // Expand (directly from chaining key)
+    crypto_chacha_ctx chacha_ctx;
+    crypto_chacha20_init  (&chacha_ctx, ctx->chaining_key, one);
+    crypto_chacha20_stream(&chacha_ctx, ctx->derived_keys, 64);
+
+    // Clean up
+    WIPE_BUFFER(shared_secret);
+    WIPE_CTX(&chacha_ctx);
+}
+
+static void kex_auth(crypto_kex_ctx *ctx, u8 mac[16])
+{
+    crypto_poly1305(mac, ctx->transcript, ctx->transcript_size,
+                    ctx->derived_keys);
+}
+
+static int kex_verify(crypto_kex_ctx *ctx, const u8 mac[16])
+{
+    u8 real_mac[16];
+    kex_auth(ctx, real_mac);
+    int mismatch = crypto_verify16(real_mac, mac);
+    if (mismatch) {  WIPE_CTX(ctx); }
+    WIPE_BUFFER(real_mac);
+    return mismatch;
+}
+
+static void kex_send(crypto_kex_ctx *ctx, u8 msg[32], const u8 src[32])
+{
+    // Send message, encrypted if we have a key
+    copy32(msg, src);
+    xor32(msg, ctx->derived_keys + 32);
+    // Record sent message
+    copy32(ctx->transcript + ctx->transcript_size, msg);
+    ctx->transcript_size += 32;
+}
+
+static void kex_receive(crypto_kex_ctx *ctx, u8 dest[32], const u8 msg[32])
+{
+    // Record incoming message
+    copy32(ctx->transcript + ctx->transcript_size, msg);
+    ctx->transcript_size += 32;
+    // Receive message, decrypted it if we have a key
+    copy32(dest, msg);
+    xor32(dest, ctx->derived_keys + 32);
+}
+
+static void kex_init(crypto_kex_ctx *ctx,
+                     const u8        local_sk[32],
+                     const u8        local_pk[32])
+{
+    if (local_pk == 0) crypto_x25519_public_key(ctx->local_pk, local_sk);
+    else               copy32                  (ctx->local_pk, local_pk);
+    copy32(ctx->chaining_key     , zero    );
+    copy32(ctx->derived_keys + 32, zero    ); // first encryption key is zero
+    copy32(ctx->local_sk         , local_sk);
+    ctx->transcript_size = 0;
+}
+
+static void kex_seed(crypto_kex_ctx *ctx, u8 random_seed[32])
+{
+    copy32(ctx->local_ske        , random_seed);
+    crypto_wipe(random_seed, 32); // auto wipe seed to avoid reuse
+    crypto_x25519_public_key(ctx->local_pke, ctx->local_ske);
+}
+
+
+///////////
+/// XK1 ///
+///////////
+static const u8 xk1_ck0[32] = "Monokex XK1";
+void crypto_kex_xk1_init_client(crypto_kex_client_ctx *client_ctx,
+                                u8                     random_seed[32],
+                                const u8               client_sk  [32],
+                                const u8               client_pk  [32],
+                                const u8               server_pk  [32])
+{
+    crypto_kex_ctx *ctx = &(client_ctx->ctx);
+    kex_init   (ctx, client_sk, client_pk);
+    kex_seed   (ctx, random_seed);
+    kex_receive(ctx, ctx->remote_pk, server_pk);
+    copy32(ctx->chaining_key, xk1_ck0);
+}
+
+void crypto_kex_xk1_init_server(crypto_kex_server_ctx *server_ctx,
+                                u8                     random_seed[32],
+                                const u8               server_sk  [32],
+                                const u8               server_pk  [32])
+{
+    crypto_kex_ctx *ctx = &(server_ctx->ctx);
+    kex_init   (ctx, server_sk, server_pk);
+    kex_seed   (ctx, random_seed);
+    kex_receive(ctx, ctx->local_pk, ctx->local_pk);
+    copy32(ctx->chaining_key, xk1_ck0);
+}
+
+void crypto_kex_xk1_1(crypto_kex_client_ctx *client_ctx,
+                      u8                     msg1[32])
+{
+    crypto_kex_ctx *ctx = &(client_ctx->ctx);
+    kex_send      (ctx, msg1           , ctx->local_pke );  // -> IE
+}
+
+void crypto_kex_xk1_2(crypto_kex_server_ctx *server_ctx,
+                      u8                     msg2[48],
+                      const u8               msg1[32])
+{
+    crypto_kex_ctx *ctx = &(server_ctx->ctx);
+    kex_receive   (ctx, ctx->remote_pke, msg1           );  // -> IE
+    kex_send      (ctx, msg2           , ctx->local_pke );  // <- RE
+    kex_update_key(ctx, ctx->local_ske , ctx->remote_pke);  //    ee
+    kex_update_key(ctx, ctx->local_sk  , ctx->remote_pke);  //    es
+    kex_auth      (ctx, msg2 + 32);                         // auth
+}
+
+int crypto_kex_xk1_3(crypto_kex_client_ctx *client_ctx,
+                     u8                     session_key[32],
+                     u8                     msg3       [48],
+                     const u8               msg2       [48])
+{
+    crypto_kex_ctx *ctx = &(client_ctx->ctx);
+    kex_receive   (ctx, ctx->remote_pke, msg2           );  // <- RE
+    kex_update_key(ctx, ctx->local_ske , ctx->remote_pke);  //    ee
+    kex_update_key(ctx, ctx->local_ske , ctx->remote_pk );  //    es
+    if (kex_verify(ctx, msg2 + 32)) { return -1; }          // verify
+    kex_send      (ctx, msg3           , ctx->local_pk  );  // -> IS
+    kex_update_key(ctx, ctx->local_sk  , ctx->remote_pke);  //    se
+    kex_auth      (ctx, msg3 + 32);                         // auth
+    copy32(session_key, ctx->derived_keys + 32);
+    WIPE_CTX(ctx);
+    return 0;
+}
+
+int crypto_kex_xk1_4(crypto_kex_server_ctx *server_ctx,
+                     u8                     session_key[32],
+                     u8                     client_pk  [32],
+                     const u8               msg3       [48])
+{
+    crypto_kex_ctx *ctx = &(server_ctx->ctx);
+    kex_receive   (ctx, ctx->remote_pk , msg3           );  // -> IS
+    kex_update_key(ctx, ctx->local_ske , ctx->remote_pk );  //    se
+    if (kex_verify(ctx, msg3 + 32)) { return -1; }          // verify
+    copy32(client_pk  , ctx->remote_pk);
+    copy32(session_key, ctx->derived_keys + 32);
+    WIPE_CTX(ctx);
+    return 0;
+}
+
+/////////
+/// X ///
+/////////
+static const u8 x_ck0[32] = "Monokex X";
+void crypto_kex_x_init_client(crypto_kex_client_ctx *client_ctx,
+                              u8                     random_seed[32],
+                              const u8               client_sk  [32],
+                              const u8               client_pk  [32],
+                              const u8               server_pk  [32])
+{
+    crypto_kex_ctx *ctx = &(client_ctx->ctx);
+    kex_init   (ctx, client_sk, client_pk);
+    kex_seed   (ctx, random_seed);
+    kex_receive(ctx, ctx->remote_pk, server_pk);
+    copy32(ctx->chaining_key, x_ck0);
+}
+
+void crypto_kex_x_init_server(crypto_kex_server_ctx *server_ctx,
+                              const u8               server_sk  [32],
+                              const u8               server_pk  [32])
+{
+    crypto_kex_ctx *ctx = &(server_ctx->ctx);
+    kex_init   (ctx, server_sk, server_pk);
+    kex_receive(ctx, ctx->local_pk, ctx->local_pk);
+    copy32(ctx->chaining_key, x_ck0);
+}
+
+void crypto_kex_x_1(crypto_kex_client_ctx *client_ctx,
+                    u8                     session_key[32],
+                    u8                     msg1       [80])
+{
+    crypto_kex_ctx *ctx = &(client_ctx->ctx);
+    kex_send      (ctx, msg1           , ctx->local_pke );  // -> IE
+    kex_update_key(ctx, ctx->local_ske , ctx->remote_pk );  //    es
+    kex_send      (ctx, msg1 + 32      , ctx->local_pk  );  // -> IS
+    kex_update_key(ctx, ctx->local_sk  , ctx->remote_pk );  //    ss
+    kex_auth      (ctx, msg1 + 64);                         // auth
+    copy32(session_key, ctx->derived_keys + 32);
+    WIPE_CTX(ctx);
+}
+
+int crypto_kex_x_2(crypto_kex_server_ctx *server_ctx,
+                   u8                     session_key[32],
+                   u8                     client_pk  [32],
+                   const u8               msg1       [80])
+{
+    crypto_kex_ctx *ctx = &(server_ctx->ctx);
+    kex_receive   (ctx, ctx->remote_pke, msg1           );  // -> IE
+    kex_update_key(ctx, ctx->local_sk  , ctx->remote_pke);  //    es
+    kex_receive   (ctx, ctx->remote_pk , msg1 + 32      );  // -> IS
+    kex_update_key(ctx, ctx->local_sk  , ctx->remote_pk );  //    ss
+    if (kex_verify(ctx, msg1 + 64)) { return -1; }          // verify
+    copy32(client_pk  , ctx->remote_pk);
+    copy32(session_key, ctx->derived_keys + 32);
+    WIPE_CTX(ctx);
+    return 0;
+}
+
