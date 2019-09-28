@@ -1,5 +1,6 @@
 
 This is a quick fork & edit to make both functions fpr deriving public keys available, so the key exchange can be done properly.
+In the process, monocypher was updated to the last commit
 
 # pymonocypher
 

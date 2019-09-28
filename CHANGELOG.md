@@ -3,6 +3,12 @@
 
 This file contains the list of changes made to pymonocypher.
 
+## 0.1.4
+
+2019 Sep 28
+
+*   Updated with last commits to monocypher 2.0.5 ++.
+
 ## 0.1.3
 
 2019 Apr 06
